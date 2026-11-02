@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Карта тривог України</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; }
+        #map { height: 100vh; width: 100%; }
+        .info-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 12px 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+            font-size: 14px;
+            max-width: 260px;
+        }
+        .info-panel h3 { margin: 0 0 6px; font-size: 16px; }
+        .info-panel .status { font-weight: bold; }
+        .info-panel .status.active { color: #d32f2f; }
+        .info-panel .status.clear { color: #2e7d32; }
+        .legend {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 1000;
+            background: white;
+            padding: 10px 14px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            font-size: 13px;
+            display: flex;
+            gap: 16px;
+        }
+        .legend-item { display: flex; align-items: center; gap: 6px; }
+        .legend-color { width: 18px; height: 18px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div class="info-panel">
+        <h3>🛡️ Статус тривог</h3>
+        <div>Областей у тривозі: <span id="alert-count" class="status">—</span></div>
+        <div style="margin-top:6px; font-size:12px; color:#666;" id="last-updated">Оновлення: —</div>
+    </div>
+
+    <div class="legend">
+        <div class="legend-item"><span class="legend-color" style="background:#d32f2f;"></span> Тривога</div>
+        <div class="legend-item"><span class="legend-color" style="background:#2e7d32;"></span> Спокійно</div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // 1. Ініціалізація карти
+        const map = L.map('map', { zoomControl: true }).setView([49.0, 31.0], 6);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        // 2. Геометрія областей України (спрощений GeoJSON)
+        const GEOJSON_URL = 'https://raw.githubusercontent.com/wmgeolab/geoBoundaries/6b002b1eee2fd9599f1a3af8fe076d694e6decee/releaseData/gbOpen/UKR/ADM1/geoBoundaries-UKR-ADM1_simplified.geojson';
+
+        // 3. Джерело даних про тривоги (відкритий API без ключа)
+        const ALERTS_API = 'https://ubilling.net.ua/aerialalerts/';
+
+        let geoLayer = null;
+
+        // Допоміжна функція для нормалізації назв (щоб зіставити API та GeoJSON)
+        function normalizeName(name) {
+            return name
+                .toLowerCase()
+                .replace(/[’'`]/g, '')
+                .replace(/\s*область\s*/g, '')
+                .replace(/\s*обл\.?\s*/g, '')
+                .trim();
+        }
+
+        // 4. Завантаження та відображення даних
+        async function loadAlerts() {
+            try {
+                // Отримуємо поточний статус тривог
+                const alertsRes = await fetch(ALERTS_API);
+                const alertsData = await alertsRes.json();
+
+                // Створюємо множину назв областей, де зараз тривога
+                const activeRegions = new Set();
+                if (alertsData.states) {
+                    for (const [regionName, params] of Object.entries(alertsData.states)) {
+                        if (params.alertnow) {
+                            activeRegions.add(normalizeName(regionName));
+                        }
+                    }
+                }
+
+                // Оновлюємо лічильник
+                const counterEl = document.getElementById('alert-count');
+                counterEl.textContent = activeRegions.size;
+                counterEl.className = 'status ' + (activeRegions.size > 0 ? 'active' : 'clear');
+                document.getElementById('last-updated').textContent =
+                    'Оновлення: ' + new Date().toLocaleTimeString('uk-UA');
+
+                // Якщо шар ще не створений — завантажуємо GeoJSON і створюємо його
+                if (!geoLayer) {
+                    const geoRes = await fetch(GEOJSON_URL);
+                    const geoJson = await geoRes.json();
+
+                    geoLayer = L.geoJSON(geoJson, {
+                        style: function(feature) {
+                            const props = feature.properties;
+                            // Намагаємось знайти назву області у властивостях GeoJSON
+                            const rawName = props.name || props.NAME_1 || props.UkrName || '';
+                            const isActive = activeRegions.has(normalizeName(rawName));
+
+                            return {
+                                color: isActive ? '#b71c1c' : '#2e7d32',
+                                weight: 1.5,
+                                fillColor: isActive ? '#d32f2f' : '#4caf50',
+                                fillOpacity: isActive ? 0.65 : 0.25,
+                            };
+                        },
+                        onEachFeature: function(feature, layer) {
+                            const rawName = feature.properties.name || feature.properties.NAME_1 || '';
+                            const isActive = activeRegions.has(normalizeName(rawName));
+                            layer.bindTooltip(
+                                `<strong>${rawName}</strong><br>${isActive ? '🔴 Тривога' : '🟢 Спокійно'}`,
+                                { sticky: true }
+                            );
+                        }
+                    }).addTo(map);
+                } else {
+                    // Якщо шар вже є — просто оновлюємо стилі без перезавантаження
+                    geoLayer.eachLayer(function(layer) {
+                        const props = layer.feature.properties;
+                        const rawName = props.name || props.NAME_1 || '';
+                        const isActive = activeRegions.has(normalizeName(rawName));
+
+                        layer.setStyle({
+                            color: isActive ? '#b71c1c' : '#2e7d32',
+                            weight: 1.5,
+                            fillColor: isActive ? '#d32f2f' : '#4caf50',
+                            fillOpacity: isActive ? 0.65 : 0.25,
+                        });
+
+                        layer.setTooltipContent(
+                            `<strong>${rawName}</strong><br>${isActive ? '🔴 Тривога' : '🟢 Спокійно'}`
+                        );
+                    });
+                }
+            } catch (err) {
+                console.error('Помилка завантаження даних:', err);
+                document.getElementById('last-updated').textContent = 'Помилка оновлення';
+            }
+        }
+
+        // 5. Перший запуск та автоматичне оновлення кожні 30 секунд
+        loadAlerts();
+        setInterval(loadAlerts, 30000);
+    </script>
+</body>
+</html>
