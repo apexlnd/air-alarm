@@ -48,11 +48,19 @@
             attribution: '© OpenStreetMap'
         }).addTo(map);
 
-        // 2. Нове джерело GeoJSON (CDN, який підтримує CORS)
+        // 2. Джерело GeoJSON (межі областей)
         const GEOJSON_URL = 'https://cdn.jsdelivr.net/gh/wmgeolab/geoBoundaries@9469f09/releaseData/gbOpen/UKR/ADM1/geoBoundaries-UKR-ADM1_simplified.geojson';
 
-        // 3. Джерело даних про тривоги через CORS-проксі
-        const ALERTS_API = 'https://api.allorigins.win/raw?url=https://ubilling.net.ua/aerialalerts/';
+        // 3. Джерело даних про тривоги
+        const TARGET_API = 'https://ubilling.net.ua/aerialalerts/';
+
+        // 4. Масив резервних CORS-проксі
+        const PROXIES = [
+            (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+            (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+            (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+            (url) => `https://api.cors.lol/?url=${encodeURIComponent(url)}`
+        ];
 
         let geoLayer = null;
 
@@ -65,15 +73,34 @@
                 .trim();
         }
 
-        // 4. Завантаження та відображення даних
+        // Функція для послідовного перебору проксі
+        async function fetchWithFallback(targetUrl) {
+            let lastError;
+            for (let i = 0; i < PROXIES.length; i++) {
+                try {
+                    const proxyUrl = PROXIES[i](targetUrl);
+                    const response = await fetch(proxyUrl);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    
+                    const text = await response.text();
+                    // Деякі проксі повертають текст, який треба розпарсити
+                    return JSON.parse(text); 
+                } catch (e) {
+                    console.warn(`Проксі №${i + 1} не спрацював:`, e.message);
+                    lastError = e;
+                }
+            }
+            throw new Error('Всі проксі вичерпано. Остання помилка: ' + lastError.message);
+        }
+
+        // 5. Завантаження та відображення даних
         async function loadAlerts() {
             try {
-                const alertsRes = await fetch(ALERTS_API);
-                if (!alertsRes.ok) throw new Error('Помилка мережі при запиті до API тривог');
-                const alertsData = await alertsRes.json();
+                // Отримуємо дані через проксі
+                const alertsData = await fetchWithFallback(TARGET_API);
 
                 const activeRegions = new Set();
-                if (alertsData.states) {
+                if (alertsData && alertsData.states) {
                     for (const [regionName, params] of Object.entries(alertsData.states)) {
                         if (params.alertnow) {
                             activeRegions.add(normalizeName(regionName));
@@ -87,6 +114,7 @@
                 document.getElementById('last-updated').textContent =
                     'Оновлення: ' + new Date().toLocaleTimeString('uk-UA');
 
+                // Якщо шар ще не створений — завантажуємо GeoJSON і створюємо його
                 if (!geoLayer) {
                     const geoRes = await fetch(GEOJSON_URL);
                     if (!geoRes.ok) throw new Error('Помилка завантаження меж областей');
@@ -113,6 +141,7 @@
                         }
                     }).addTo(map);
                 } else {
+                    // Оновлюємо існуючий шар
                     geoLayer.eachLayer(function(layer) {
                         const props = layer.feature.properties;
                         const rawName = props.shapeName || props.name || '';
@@ -130,14 +159,13 @@
                 }
             } catch (err) {
                 console.error('Помилка завантаження даних:', err);
-                document.getElementById('last-updated').textContent = 'Помилка оновлення (перевірте консоль)';
+                document.getElementById('last-updated').textContent = 'Помилка оновлення (немає зв\'язку)';
             }
         }
 
+        // 6. Перший запуск та інтервал
         loadAlerts();
         setInterval(loadAlerts, 30000);
     </script>
-    <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-<script>eruda.init();</script>
 </body>
 </html>
