@@ -42,23 +42,21 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // 1. Ініціалізація карти
+        // Ініціалізація карти
         const map = L.map('map', { zoomControl: true }).setView([49.0, 31.0], 6);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap'
         }).addTo(map);
 
-        // 2. Джерело GeoJSON (межі областей)
-        const GEOJSON_URL = 'https://cdn.jsdelivr.net/gh/wmgeolab/geoBoundaries@9469f09/releaseData/gbOpen/UKR/ADM1/geoBoundaries-UKR-ADM1_simplified.geojson';
+        // Два джерела для меж областей (основне та резервне)
+        const GEOJSON_URL = 'https://cdn.jsdelivr.net/gh/wmgeolab/geoBoundaries@main/releaseData/gbOpen/UKR/ADM1/geoBoundaries-UKR-ADM1_simplified.geojson';
+        const GEOJSON_FALLBACK = 'https://raw.githubusercontent.com/org-scn-design-system/region-ua/master/ua_regions.geojson';
 
-        // 3. Джерело даних про тривоги
+        // Дані про тривоги
         const TARGET_API = 'https://ubilling.net.ua/aerialalerts/';
-
-        // 4. Масив резервних CORS-проксі
         const PROXIES = [
             (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
             (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-            (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
             (url) => `https://api.cors.lol/?url=${encodeURIComponent(url)}`
         ];
 
@@ -70,10 +68,10 @@
                 .replace(/[’'`]/g, '')
                 .replace(/\s*область\s*/g, '')
                 .replace(/\s*обл\.?\s*/g, '')
+                .replace(/\s*місто\s*/g, '')
                 .trim();
         }
 
-        // Функція для послідовного перебору проксі
         async function fetchWithFallback(targetUrl) {
             let lastError;
             for (let i = 0; i < PROXIES.length; i++) {
@@ -81,22 +79,16 @@
                     const proxyUrl = PROXIES[i](targetUrl);
                     const response = await fetch(proxyUrl);
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    
-                    const text = await response.text();
-                    // Деякі проксі повертають текст, який треба розпарсити
-                    return JSON.parse(text); 
+                    return await response.json(); 
                 } catch (e) {
-                    console.warn(`Проксі №${i + 1} не спрацював:`, e.message);
                     lastError = e;
                 }
             }
-            throw new Error('Всі проксі вичерпано. Остання помилка: ' + lastError.message);
+            throw new Error('Всі проксі вичерпано: ' + lastError.message);
         }
 
-        // 5. Завантаження та відображення даних
         async function loadAlerts() {
             try {
-                // Отримуємо дані через проксі
                 const alertsData = await fetchWithFallback(TARGET_API);
 
                 const activeRegions = new Set();
@@ -114,15 +106,23 @@
                 document.getElementById('last-updated').textContent =
                     'Оновлення: ' + new Date().toLocaleTimeString('uk-UA');
 
-                // Якщо шар ще не створений — завантажуємо GeoJSON і створюємо його
+                // Якщо межі ще не завантажені - вантажимо їх
                 if (!geoLayer) {
-                    const geoRes = await fetch(GEOJSON_URL);
-                    if (!geoRes.ok) throw new Error('Помилка завантаження меж областей');
-                    const geoJson = await geoRes.json();
+                    let geoJson = null;
+                    try {
+                        const geoRes = await fetch(GEOJSON_URL);
+                        if (!geoRes.ok) throw new Error('Main URL failed');
+                        geoJson = await geoRes.json();
+                    } catch (e) {
+                        console.warn('Основне посилання на межі не працює, пробуємо резервне...');
+                        const geoResFallback = await fetch(GEOJSON_FALLBACK);
+                        geoJson = await geoResFallback.json();
+                    }
 
                     geoLayer = L.geoJSON(geoJson, {
                         style: function(feature) {
-                            const rawName = feature.properties.shapeName || feature.properties.name || '';
+                            // У різних файлах назви можуть бути в різних полях
+                            const rawName = feature.properties.shapeName || feature.properties.name || feature.properties.NAME_1 || feature.properties.UkrName || '';
                             const isActive = activeRegions.has(normalizeName(rawName));
                             return {
                                 color: isActive ? '#b71c1c' : '#2e7d32',
@@ -132,7 +132,7 @@
                             };
                         },
                         onEachFeature: function(feature, layer) {
-                            const rawName = feature.properties.shapeName || feature.properties.name || '';
+                            const rawName = feature.properties.shapeName || feature.properties.name || feature.properties.NAME_1 || feature.properties.UkrName || '';
                             const isActive = activeRegions.has(normalizeName(rawName));
                             layer.bindTooltip(
                                 `<strong>${rawName}</strong><br>${isActive ? '🔴 Тривога' : '🟢 Спокійно'}`,
@@ -141,10 +141,10 @@
                         }
                     }).addTo(map);
                 } else {
-                    // Оновлюємо існуючий шар
+                    // Оновлення кольорів, якщо межі вже є
                     geoLayer.eachLayer(function(layer) {
                         const props = layer.feature.properties;
-                        const rawName = props.shapeName || props.name || '';
+                        const rawName = props.shapeName || props.name || props.NAME_1 || props.UkrName || '';
                         const isActive = activeRegions.has(normalizeName(rawName));
                         layer.setStyle({
                             color: isActive ? '#b71c1c' : '#2e7d32',
@@ -158,12 +158,11 @@
                     });
                 }
             } catch (err) {
-                console.error('Помилка завантаження даних:', err);
-                document.getElementById('last-updated').textContent = 'Помилка оновлення (немає зв\'язку)';
+                console.error('Помилка:', err);
+                document.getElementById('last-updated').textContent = 'Помилка оновлення';
             }
         }
 
-        // 6. Перший запуск та інтервал
         loadAlerts();
         setInterval(loadAlerts, 30000);
     </script>
