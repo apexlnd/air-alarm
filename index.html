@@ -42,17 +42,16 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // Ініціалізація карти
+        // 1. Ініціалізація карти
         const map = L.map('map', { zoomControl: true }).setView([49.0, 31.0], 6);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap'
         }).addTo(map);
 
-        // Два джерела для меж областей (основне та резервне)
-        const GEOJSON_URL = 'https://cdn.jsdelivr.net/gh/wmgeolab/geoBoundaries@main/releaseData/gbOpen/UKR/ADM1/geoBoundaries-UKR-ADM1_simplified.geojson';
-        const GEOJSON_FALLBACK = 'https://raw.githubusercontent.com/org-scn-design-system/region-ua/master/ua_regions.geojson';
+        // 2. Джерело GeoJSON з УКРАЇНСЬКИМИ назвами (щоб вони збігалися з API)
+        const GEOJSON_URL = 'https://raw.githubusercontent.com/org-scn-design-system/region-ua/master/ua_regions.geojson';
 
-        // Дані про тривоги
+        // 3. Дані про тривоги
         const TARGET_API = 'https://ubilling.net.ua/aerialalerts/';
         const PROXIES = [
             (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
@@ -62,16 +61,19 @@
 
         let geoLayer = null;
 
+        // Очищення назв для порівняння (прибираємо "область", "м.", пробіли тощо)
         function normalizeName(name) {
             if (!name) return '';
             return name.toLowerCase()
                 .replace(/[’'`]/g, '')
                 .replace(/\s*область\s*/g, '')
                 .replace(/\s*обл\.?\s*/g, '')
+                .replace(/^м\.\s*/g, '') // прибирає "м. " на початку
                 .replace(/\s*місто\s*/g, '')
                 .trim();
         }
 
+        // Безпечний запит з перебором проксі
         async function fetchWithFallback(targetUrl) {
             let lastError;
             for (let i = 0; i < PROXIES.length; i++) {
@@ -79,8 +81,15 @@
                     const proxyUrl = PROXIES[i](targetUrl);
                     const response = await fetch(proxyUrl);
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    return await response.json(); 
+                    
+                    const text = await response.text();
+                    try {
+                        return JSON.parse(text); // Намагаємося розпарсити
+                    } catch (parseError) {
+                        throw new Error('Проксі повернув не JSON');
+                    }
                 } catch (e) {
+                    console.warn(`Проксі №${i + 1} не спрацював:`, e.message);
                     lastError = e;
                 }
             }
@@ -89,6 +98,7 @@
 
         async function loadAlerts() {
             try {
+                // Отримуємо дані про тривоги
                 const alertsData = await fetchWithFallback(TARGET_API);
 
                 const activeRegions = new Set();
@@ -100,29 +110,23 @@
                     }
                 }
 
+                // Оновлюємо панель статусу
                 const counterEl = document.getElementById('alert-count');
                 counterEl.textContent = activeRegions.size;
                 counterEl.className = 'status ' + (activeRegions.size > 0 ? 'active' : 'clear');
                 document.getElementById('last-updated').textContent =
                     'Оновлення: ' + new Date().toLocaleTimeString('uk-UA');
 
-                // Якщо межі ще не завантажені - вантажимо їх
+                // Якщо межі ще не завантажені
                 if (!geoLayer) {
-                    let geoJson = null;
-                    try {
-                        const geoRes = await fetch(GEOJSON_URL);
-                        if (!geoRes.ok) throw new Error('Main URL failed');
-                        geoJson = await geoRes.json();
-                    } catch (e) {
-                        console.warn('Основне посилання на межі не працює, пробуємо резервне...');
-                        const geoResFallback = await fetch(GEOJSON_FALLBACK);
-                        geoJson = await geoResFallback.json();
-                    }
+                    const geoRes = await fetch(GEOJSON_URL);
+                    if (!geoRes.ok) throw new Error('Помилка завантаження меж');
+                    const geoJson = await geoRes.json();
 
                     geoLayer = L.geoJSON(geoJson, {
                         style: function(feature) {
-                            // У різних файлах назви можуть бути в різних полях
-                            const rawName = feature.properties.shapeName || feature.properties.name || feature.properties.NAME_1 || feature.properties.UkrName || '';
+                            // У цьому файлі назва області лежить у властивості "name"
+                            const rawName = feature.properties.name || '';
                             const isActive = activeRegions.has(normalizeName(rawName));
                             return {
                                 color: isActive ? '#b71c1c' : '#2e7d32',
@@ -132,7 +136,7 @@
                             };
                         },
                         onEachFeature: function(feature, layer) {
-                            const rawName = feature.properties.shapeName || feature.properties.name || feature.properties.NAME_1 || feature.properties.UkrName || '';
+                            const rawName = feature.properties.name || '';
                             const isActive = activeRegions.has(normalizeName(rawName));
                             layer.bindTooltip(
                                 `<strong>${rawName}</strong><br>${isActive ? '🔴 Тривога' : '🟢 Спокійно'}`,
@@ -143,8 +147,7 @@
                 } else {
                     // Оновлення кольорів, якщо межі вже є
                     geoLayer.eachLayer(function(layer) {
-                        const props = layer.feature.properties;
-                        const rawName = props.shapeName || props.name || props.NAME_1 || props.UkrName || '';
+                        const rawName = layer.feature.properties.name || '';
                         const isActive = activeRegions.has(normalizeName(rawName));
                         layer.setStyle({
                             color: isActive ? '#b71c1c' : '#2e7d32',
